@@ -4,6 +4,7 @@ import (
     "bytes"
     "errors"
     "fmt"
+    "math"
     "regexp"
     "strings"
     "unicode"
@@ -19,6 +20,8 @@ type Rewriter struct {
     Named          map[string]*config.Config
     InitialOct     *int // nil => default 5
     RelativeThresh *int // nil => disabled; when |Δ|>K use oN
+    // Mode: when true, token's base pitch follows current octave; when false, use absolute (legacy)
+    FollowOctave   bool
 }
 
 var (
@@ -103,8 +106,8 @@ func (rw *Rewriter) Rewrite(src string) (string, error) {
                     br = activeCfg.BendRange
                 }
 
-                // Output BR header
-                out.WriteString(fmt.Sprintf("BR(%d)", br))
+                // Output BR header with spaces around
+                out.WriteString(fmt.Sprintf(" BR(%d) ", br))
 
                 // Initialize curOct from left context
                 left := clean[:i]
@@ -201,7 +204,22 @@ func (rw *Rewriter) Rewrite(src string) (string, error) {
                     }
                     dpm, err := activeCfg.EvalPM(kp, km)
                     if err != nil { return "", err }
-                    fTarget := activeCfg.BaseHz + dn + dpm
+                    baseA := activeCfg.BaseHz
+                    if baseA <= 0 { return "", errors.New("baseHz must be > 0") }
+                    // base note frequency relative to A4
+                    fNote := baseA + dn
+                    var fTarget float64
+                    if rw.FollowOctave {
+                        // Find reference octave of this note, then shift to current octave
+                        nRef := tuning.Nearest12TET(baseA, fNote)
+                        _, octRef := tuning.SplitN(nRef)
+                        shift := curOct - octRef
+                        fAtCur := fNote * math.Pow(2, float64(shift))
+                        fTarget = fAtCur + dpm
+                    } else {
+                        // Absolute mode (legacy)
+                        fTarget = fNote + dpm
+                    }
                     if fTarget <= 0 {
                         return "", fmt.Errorf("f_target<=0 for token %s", token)
                     }
@@ -220,10 +238,14 @@ func (rw *Rewriter) Rewrite(src string) (string, error) {
 
                     // Emit
                     out.WriteString(relFix)
+                    out.WriteString(" ")
                     out.WriteString(fmt.Sprintf("PB(%d)", pb))
+                    out.WriteString(" ")
                     out.WriteString(pc)
                     out.WriteString(tail)
+                    out.WriteString(" ")
                     out.WriteString("PB(0)")
+                    out.WriteString(" ")
                     if clipped {
                         out.WriteString(" // WARN: bend overflow")
                     }

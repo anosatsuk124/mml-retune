@@ -17,11 +17,12 @@ Implements the emit-relative-octave variant for `TUNE{}`/`TUNE(n){}` scopes. Cho
   - or `go install github.com/anosatsuk124/mml-retune/cmd/mml-retune@latest`
 
 **CLI**
-- `mml-retune [-c config.json] [--initial-octave N] [--relative-threshold K]`
+- `mml-retune [-c config.json] [--initial-octave N] [--relative-threshold K] [--mode follow|absolute]`
   - Input: stdin, Output: stdout, Exit 0 on success.
   - `-c, --config`: Default config for `TUNE{}` / `TUNE(n){}`. Optional if you only use `TUNE("NAME"){}` with embedded configs.
   - `--initial-octave N`: Fallback octave when no left-context `oN` exists (default 5)
   - `--relative-threshold K`: If `|Δ| > K`, emit `oN` instead of repeated `<`/`>` (disabled by default)
+  - `--mode`: Pitch mapping mode. `follow` (default) uses the current octave to place the token’s pitch; `absolute` uses the legacy absolute mapping.
 
 **Embedded Configs**
 - Define named configs in safe comment blocks and reference with `TUNE("NAME"){ ... }`.
@@ -68,7 +69,12 @@ Implements the emit-relative-octave variant for `TUNE{}`/`TUNE(n){}` scopes. Cho
 - `Δnote = eval(notes[token])`
 - `k_plus, k_minus` = counts of trailing `+`/`-`
 - `Δpm = k_plus * plusHz - k_minus * minusHz`
-- `f_target = baseHz + Δnote + Δpm` (must be `> 0`)
+- In `follow` mode (default):
+  1) `f_note = baseHz + Δnote`
+  2) Determine note’s reference octave via nearest 12‑TET: `octRef = SplitN(Nearest12TET(baseHz, f_note)).octAbs`
+  3) Shift to current octave: `f_note_at_cur = f_note * 2^(curOct - octRef)`
+  4) `f_target = f_note_at_cur + Δpm` (must be `> 0`)
+- In `absolute` mode (legacy): `f_target = baseHz + Δnote + Δpm` (must be `> 0`)
 - Nearest 12‑TET: `f(n) = baseHz * 2^(n/12)` with `n = round(12*log2(f_target/baseHz))`, tie‑break by smaller `|n|`.
 - Split `n` into `pc` and `octAbs` with `A4` as `a` at `octAbs=4`. Pitch classes: `c c+ d d+ e f f+ g g+ a a+ b`.
 

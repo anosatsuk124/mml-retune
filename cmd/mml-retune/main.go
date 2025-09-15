@@ -16,6 +16,7 @@ func main() {
     cfgPathLong := flag.String("config", "", "Path to config JSON (alias of -c)")
     initOct := flag.Int("initial-octave", 5, "Initial octave when no left-context 'oN' is found")
     relThresh := flag.Int("relative-threshold", -1, "When |Δ| exceeds this, use oN instead of repeated < or >; -1 disables")
+    mode := flag.String("mode", "follow", "Pitch mapping mode: follow (default) or absolute")
     flag.Parse()
 
     path := *cfgPath
@@ -45,6 +46,16 @@ func main() {
     rw := &scanner.Rewriter{Cfg: cfg}
     if initOct != nil { rw.InitialOct = initOct }
     if relThresh != nil && *relThresh >= 0 { rw.RelativeThresh = relThresh }
+    // mode
+    switch *mode {
+    case "follow", "":
+        rw.FollowOctave = true
+    case "absolute":
+        rw.FollowOctave = false
+    default:
+        fmt.Fprintln(os.Stderr, "invalid --mode, must be 'follow' or 'absolute'")
+        os.Exit(2)
+    }
 
     out, err := rw.Rewrite(string(data))
     if err != nil {

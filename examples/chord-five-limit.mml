@@ -1,37 +1,3 @@
-STR SET_CH = { STR CUR_CH=#?1 CH(#?1) }
-
-/* !JSON: "FiveLimit_A"
-{
-  "baseHz": 440,
-  "notes": {
-    "a": "440*1 - 440",
-    "as": "440*(25/24) - 440",
-    "bb": "440*(16/15) - 440",
-    "b": "440*(9/8) - 440",
-    "c": "440*(6/5) - 440",
-    "cs": "440*(5/4) - 440",
-    "db": "440*(81/64) - 440",
-    "d": "440*(4/3) - 440",
-    "ds": "440*(45/32) - 440",
-    "eb": "440*(64/45) - 440",
-    "e": "440*(3/2) - 440",
-    "f": "440*(8/5) - 440",
-    "fs": "440*(5/3) - 440",
-    "g": "440*(16/9) - 440",
-    "gs": "440*(15/8) - 440"
-  },
-  "plusHz": "0",
-  "minusHz": 0,
-  "bendRangeSemitones": 2
-}
-*/
-
-TUNE("FiveLimit_A"){
-  TR(1) SET_CH(1)
-  o5 l8
-  a as bb b c cs db d ds eb e f fs g gs
-}
-
 /* !JSON: "FiveLimit_C"
 {
   "baseHz": 440,
@@ -59,15 +25,14 @@ TUNE("FiveLimit_A"){
 }
 */
 
+STR SET_CH = { STR CUR_CH=#?1 CH(#?1) }
+
 STR SUB1 = { CH(2) SUB{#?1} CH(CUR_CH) }
 STR SUB2 = { CH(3) SUB{#?1} CH(CUR_CH) }
 STR SUB3 = { CH(4) SUB{#?1} CH(CUR_CH) }
 
 TUNE("FiveLimit_C"){
-  TR(1) SET_CH(1)
-  o5 l4
-  c cs db d ds eb e f fs g gs ab a as bb b
-  l1
+  TR(1) SET_CH(1) o5 l1
   SUB1{c} SUB2{e} {g}
   SUB1{f} SUB2{a} {>c<}
   SUB1{g} SUB2{b} {>d<}
