@@ -35,7 +35,7 @@ TUNE("FiveLimit_C"){
   TR(1) SET_CH(1) o5 l1
   SUB1{c} SUB2{e} {g}
   SUB1{f} SUB2{a} {>c<}
-  SUB1{g} SUB2{b} {>d<}
+  SUB1{g} SUB2{b} SUB3{>d<} {>f<}
   SUB1{c} SUB2{e} {g}
 }
 
