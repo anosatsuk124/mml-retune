@@ -1,6 +1,7 @@
 package scanner
 
 import (
+    "bytes"
     "errors"
     "fmt"
     "regexp"
@@ -12,22 +13,41 @@ import (
 )
 
 type Rewriter struct {
+    // Default config (used for TUNE{} and TUNE(n){})
     Cfg            *config.Config
+    // Named configs loaded from embedded JSON comments
+    Named          map[string]*config.Config
     InitialOct     *int // nil => default 5
     RelativeThresh *int // nil => disabled; when |Δ|>K use oN
 }
 
 var (
-    reTuneHdr = regexp.MustCompile(`(?i)TUNE\s*(?:\(\s*(\d+)\s*\))?\s*\{`)
+    // TUNE header: optional ("NAME") or (number)
+    // Captures: 1=name, 2=number
+    reTuneHdr = regexp.MustCompile(`(?i)TUNE\s*(?:\(\s*(?:"([A-Za-z_][A-Za-z0-9_]*)"|(\d+))\s*\))?\s*\{`)
     reON      = regexp.MustCompile(`o\s*(\d+)`)
 )
 
 func (rw *Rewriter) Rewrite(src string) (string, error) {
-    if rw == nil || rw.Cfg == nil {
-        return "", errors.New("nil rewriter or config")
+    if rw == nil {
+        return "", errors.New("nil rewriter")
     }
-    if rw.Cfg.BaseHz <= 0 {
-        return "", errors.New("baseHz must be > 0")
+
+    // Prepass: extract and strip embedded JSON configs
+    clean, named, err := extractEmbeddedConfigs(src)
+    if err != nil {
+        return "", err
+    }
+    // Merge into rw.Named (runtime-provided map takes precedence if keys collide?)
+    // For safety, disallow collisions: if both provided and differ, error.
+    if len(named) > 0 {
+        if rw.Named == nil { rw.Named = map[string]*config.Config{} }
+        for k, v := range named {
+            if _, exists := rw.Named[k]; exists {
+                return "", fmt.Errorf("duplicate embedded config name: %s", k)
+            }
+            rw.Named[k] = v
+        }
     }
 
     type state int
@@ -40,36 +60,54 @@ func (rw *Rewriter) Rewrite(src string) (string, error) {
     var out strings.Builder
     curOct := 5
     if rw.InitialOct != nil { curOct = *rw.InitialOct } else { curOct = 5 }
-    bendRange := rw.Cfg.BendRange
+    bendRange := 0 // will be set on entering a TUNE scope
+    var activeCfg *config.Config
+    braceDepth := 0
 
     // Prebuild keys for longest-match
-    keys := rw.Cfg.KeysDesc()
+    var keys []string
 
-    for i < len(src) {
+    for i < len(clean) {
         switch st {
         case outside:
             // Try to match TUNE header at position i
-            if loc := reTuneHdr.FindStringSubmatchIndex(src[i:]); loc != nil && loc[0] == 0 {
+            if loc := reTuneHdr.FindStringSubmatchIndex(clean[i:]); loc != nil && loc[0] == 0 {
                 // header spans i..i+loc[1]
+                sub := reTuneHdr.FindStringSubmatch(clean[i:])
+                name := ""
                 nStr := ""
-                if loc[2] >= 0 {
-                    nStr = src[i+loc[2] : i+loc[3]]
+                if len(sub) >= 3 {
+                    name = sub[1]
+                    nStr = sub[2]
                 }
+
+                // Select config and BR
                 br := bendRange
-                if nStr != "" {
-                    // parse integer
+                if name != "" {
+                    cfg := rw.Named[name]
+                    if cfg == nil { return "", fmt.Errorf("unknown TUNE(\"%s\"): no embedded config", name) }
+                    activeCfg = cfg
+                    br = activeCfg.BendRange
+                } else if nStr != "" {
+                    // numerical BR with default config
+                    activeCfg = rw.Cfg
+                    if activeCfg == nil { return "", errors.New("TUNE(n){...} requires a default config (-c) but none was provided") }
                     var n int
                     fmt.Sscanf(nStr, "%d", &n)
                     br = n
-                    if br <= 0 {
-                        return "", fmt.Errorf("invalid BR in TUNE(n): %s", nStr)
-                    }
+                    if br <= 0 { return "", fmt.Errorf("invalid BR in TUNE(n): %s", nStr) }
+                } else {
+                    // bare TUNE: default config and its default BR
+                    activeCfg = rw.Cfg
+                    if activeCfg == nil { return "", errors.New("TUNE{...} requires a default config (-c) but none was provided") }
+                    br = activeCfg.BendRange
                 }
+
                 // Output BR header
                 out.WriteString(fmt.Sprintf("BR(%d)", br))
 
                 // Initialize curOct from left context
-                left := src[:i]
+                left := clean[:i]
                 curOct = rw.initOctaveFromLeft(left)
 
                 // advance
@@ -77,31 +115,45 @@ func (rw *Rewriter) Rewrite(src string) (string, error) {
                 st = inside
                 // set current bend range for inside block
                 bendRange = br
+                // refresh keys for active config
+                keys = activeCfg.KeysDesc()
+                // initialize brace depth: we've just consumed the opening '{' of TUNE
+                braceDepth = 1
                 continue
             }
             // else: copy one rune
-            out.WriteByte(src[i])
-            // unmatched closing brace here is an error per spec
-            if src[i] == '}' {
-                return "", errors.New("unexpected '}' outside TUNE scope")
-            }
+            out.WriteByte(clean[i])
             i++
 
         case inside:
             // Nested TUNE detection is an error
-            if loc := reTuneHdr.FindStringSubmatchIndex(src[i:]); loc != nil && loc[0] == 0 {
+            if loc := reTuneHdr.FindStringSubmatchIndex(clean[i:]); loc != nil && loc[0] == 0 {
                 return "", errors.New("nested TUNE is not allowed")
             }
-            if src[i] == '}' {
-                // consume and switch to outside (do not output)
+            // Handle braces: maintain TUNE-scope depth; only depth==0 ends TUNE
+            if clean[i] == '{' {
+                braceDepth++
+                out.WriteByte(clean[i])
                 i++
-                st = outside
+                continue
+            }
+            if clean[i] == '}' {
+                braceDepth--
+                if braceDepth == 0 {
+                    // end of TUNE scope; consume but do not output
+                    i++
+                    st = outside
+                    continue
+                }
+                // inner brace close; output it
+                out.WriteByte(clean[i])
+                i++
                 continue
             }
             // Handle oN update inside
-            if m := reON.FindStringIndex(src[i:]); m != nil && m[0] == 0 {
+            if m := reON.FindStringIndex(clean[i:]); m != nil && m[0] == 0 {
                 // write through and update curOct
-                s := src[i : i+m[1]]
+                s := clean[i : i+m[1]]
                 out.WriteString(s)
                 sub := reON.FindStringSubmatch(s)
                 var n int
@@ -111,9 +163,9 @@ func (rw *Rewriter) Rewrite(src string) (string, error) {
                 continue
             }
             // Handle '<' or '>' explicitly to track curOct
-            if src[i] == '<' || src[i] == '>' {
-                if src[i] == '<' { curOct-- } else { curOct++ }
-                out.WriteByte(src[i])
+            if clean[i] == '<' || clean[i] == '>' {
+                if clean[i] == '<' { curOct-- } else { curOct++ }
+                out.WriteByte(clean[i])
                 i++
                 continue
             }
@@ -121,49 +173,49 @@ func (rw *Rewriter) Rewrite(src string) (string, error) {
             // Try longest-match against tokens
             matched := false
             for _, k := range keys {
-                if strings.HasPrefix(src[i:], k) {
+                if strings.HasPrefix(clean[i:], k) {
                     // Found token
                     matched = true
                     token := k
                     j := i + len(token)
                     // Count immediate +/- sequence
                     kp, km := 0, 0
-                    for j < len(src) {
-                        if src[j] == '+' { kp++; j++ } else if src[j] == '-' { km++; j++ } else { break }
+                    for j < len(clean) {
+                        if clean[j] == '+' { kp++; j++ } else if clean[j] == '-' { km++; j++ } else { break }
                     }
                     // Tail: contiguous non-whitespace chars after +/-; stop at whitespace or '}'
                     tailStart := j
-                    for j < len(src) {
-                        r := src[j]
+                    for j < len(clean) {
+                        r := clean[j]
                         if unicode.IsSpace(rune(r)) || r == '}' { break }
                         j++
                     }
-                    tail := src[tailStart:j]
+                    tail := clean[tailStart:j]
 
                     // Evaluate frequency target
-                    dn, ok, err := rw.Cfg.EvalDelta(token)
+                    dn, ok, err := activeCfg.EvalDelta(token)
                     if err != nil { return "", err }
                     if !ok { // should not happen as token came from keys
                         matched = false
                         break
                     }
-                    dpm, err := rw.Cfg.EvalPM(kp, km)
+                    dpm, err := activeCfg.EvalPM(kp, km)
                     if err != nil { return "", err }
-                    fTarget := rw.Cfg.BaseHz + dn + dpm
+                    fTarget := activeCfg.BaseHz + dn + dpm
                     if fTarget <= 0 {
                         return "", fmt.Errorf("f_target<=0 for token %s", token)
                     }
 
                     // Nearest 12-TET and octave split
-                    n := tuning.Nearest12TET(rw.Cfg.BaseHz, fTarget)
+                    n := tuning.Nearest12TET(activeCfg.BaseHz, fTarget)
                     pc, octAbs := tuning.SplitN(n)
-                    // Relative octave fix
-                    delta := octAbs - curOct
+                    // Relative octave fix (compute against current textual curOct)
+                    prevCur := curOct
+                    delta := octAbs - prevCur
                     relFix := relativeFix(delta, rw.RelativeThresh, octAbs)
-                    curOct = octAbs
 
                     // PB calculation
-                    det := tuning.DetuneSemitones(rw.Cfg.BaseHz, fTarget, n)
+                    det := tuning.DetuneSemitones(activeCfg.BaseHz, fTarget, n)
                     pb, clipped := tuning.PBValue(det, bendRange)
 
                     // Emit
@@ -178,12 +230,18 @@ func (rw *Rewriter) Rewrite(src string) (string, error) {
 
                     // advance
                     i = j
+                    // After emitting, update curOct to reflect only the textual tail effects
+                    // (notes themselves do not change curOct; preserve author's octave context)
+                    if len(tail) > 0 {
+                        curOct += countChar(tail, '>')
+                        curOct -= countChar(tail, '<')
+                    }
                     break
                 }
             }
             if matched { continue }
             // Fallback: copy one byte
-            out.WriteByte(src[i])
+            out.WriteByte(clean[i])
             i++
         }
     }
@@ -229,3 +287,115 @@ func relativeFix(delta int, thresh *int, octAbs int) string {
 }
 
 func abs(x int) int { if x < 0 { return -x }; return x }
+func countChar(s string, ch byte) int {
+    c := 0
+    for i := 0; i < len(s); i++ {
+        if s[i] == ch { c++ }
+    }
+    return c
+}
+
+// ---------------------------
+// Embedded config extraction
+// ---------------------------
+
+func extractEmbeddedConfigs(src string) (string, map[string]*config.Config, error) {
+    if src == "" { return src, nil, nil }
+    named := map[string]*config.Config{}
+    var out strings.Builder
+    i := 0
+    for i < len(src) {
+        // look for comment start
+        if i+1 < len(src) && src[i] == '/' && src[i+1] == '*' {
+            // find comment end
+            end := strings.Index(src[i+2:], "*/")
+            if end < 0 {
+                return "", nil, errors.New("unterminated comment block")
+            }
+            end += i + 2
+            content := src[i+2 : end]
+            // check for !JSON:
+            trimmed := strings.TrimLeft(content, " \t\r\n")
+            if strings.HasPrefix(trimmed, "!JSON:") {
+                rest := strings.TrimSpace(trimmed[len("!JSON:"):])
+                // expect "NAME"
+                if len(rest) == 0 || rest[0] != '"' {
+                    return "", nil, errors.New("!JSON: expects \"NAME\" immediately after colon")
+                }
+                nameEnd := strings.IndexByte(rest[1:], '"')
+                if nameEnd < 0 {
+                    return "", nil, errors.New("!JSON: missing closing quote for name")
+                }
+                name := rest[1 : 1+nameEnd]
+                if !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString(name) {
+                    return "", nil, fmt.Errorf("invalid embedded config name: %q", name)
+                }
+                // after the name, find first '{'
+                afterName := rest[1+nameEnd+1:]
+                idx := strings.IndexByte(afterName, '{')
+                if idx < 0 {
+                    return "", nil, errors.New("!JSON: missing JSON object after name")
+                }
+                jsonStartInRest := 1 + nameEnd + 1 + idx
+                jsonText, _, err := extractJSONObject(rest, jsonStartInRest)
+                if err != nil {
+                    return "", nil, err
+                }
+                // parse config
+                cfg, err := config.Load(bytes.NewReader([]byte(jsonText)))
+                if err != nil {
+                    return "", nil, fmt.Errorf("embedded config %s: %w", name, err)
+                }
+                if _, dup := named[name]; dup {
+                    return "", nil, fmt.Errorf("duplicate embedded config name: %s", name)
+                }
+                named[name] = cfg
+                // skip emitting this comment block (remove it)
+                i = end + 2
+                continue
+            }
+            // normal comment: keep as-is
+            out.WriteString(src[i : end+2])
+            i = end + 2
+            continue
+        }
+        out.WriteByte(src[i])
+        i++
+    }
+    return out.String(), named, nil
+}
+
+// extractJSONObject expects s[start] == '{' and returns the full JSON text and end index.
+func extractJSONObject(s string, start int) (text string, end int, err error) {
+    if start < 0 || start >= len(s) || s[start] != '{' {
+        return "", 0, errors.New("internal: extractJSONObject start is not '{'")
+    }
+    depth := 0
+    inStr := false
+    esc := false
+    for i := start; i < len(s); i++ {
+        c := s[i]
+        if inStr {
+            if esc {
+                esc = false
+            } else if c == '\\' {
+                esc = true
+            } else if c == '"' {
+                inStr = false
+            }
+            continue
+        }
+        switch c {
+        case '"':
+            inStr = true
+        case '{':
+            depth++
+        case '}':
+            depth--
+            if depth == 0 {
+                return s[start : i+1], i, nil
+            }
+        }
+    }
+    return "", 0, errors.New("unterminated JSON object in embedded config")
+}

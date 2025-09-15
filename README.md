@@ -17,11 +17,28 @@ Implements the emit-relative-octave variant for `TUNE{}`/`TUNE(n){}` scopes. Cho
   - or `go install github.com/anosatsuk124/mml-retune/cmd/mml-retune@latest`
 
 **CLI**
-- `mml-retune -c config.json [--initial-octave N] [--relative-threshold K]`
+- `mml-retune [-c config.json] [--initial-octave N] [--relative-threshold K]`
   - Input: stdin, Output: stdout, Exit 0 on success.
-  - `-c, --config`: Path to JSON config (required)
+  - `-c, --config`: Default config for `TUNE{}` / `TUNE(n){}`. Optional if you only use `TUNE("NAME"){}` with embedded configs.
   - `--initial-octave N`: Fallback octave when no left-context `oN` exists (default 5)
   - `--relative-threshold K`: If `|Δ| > K`, emit `oN` instead of repeated `<`/`>` (disabled by default)
+
+**Embedded Configs**
+- Define named configs in safe comment blocks and reference with `TUNE("NAME"){ ... }`.
+- Syntax:
+  ```
+  /* !JSON: "NAME"
+  { ... config JSON ... }
+  */
+  TUNE("NAME"){ ... }
+  ```
+- Rules:
+  - `!JSON:` is mandatory; `"NAME"` must match `[A-Za-z_][A-Za-z0-9_]*`.
+  - JSON schema is identical to the main config.
+  - These blocks are stripped from output; only affect transformation.
+  - Duplicate names or malformed blocks are errors.
+  - `TUNE("NAME"){}` switches the active config and emits `BR(config.BendRangeSemitones)` at scope entry.
+  - `TUNE{}` and `TUNE(n){}` use the default config passed via `-c`.
 
 **Config JSON**
 ```
@@ -99,6 +116,31 @@ TUNE{
 }
 r4
 ```
+
+**Embedded Config Example**
+```
+/* !JSON: "JI_WESTERN"
+{
+  "baseHz": 440,
+  "notes": {
+    "a": 0,
+    "b": "440*(9/8)-440",
+    "c": "440*(6/5)-440",
+    "d": "440*(4/3)-440",
+    "e": "440*(3/2)-440",
+    "f": "440*(8/5)-440",
+    "g": "440*(16/9)-440"
+  },
+  "plusHz": "55",
+  "minusHz": 55,
+  "bendRangeSemitones": 2
+}
+*/
+
+TUNE("JI_WESTERN"){
+  a b c d e f g
+}
+```
 Output (values illustrative):
 ```
 t120 o5 l8 < a >
@@ -118,4 +160,3 @@ Note: No special handling for chords. Outside scopes pass through unchanged.
 **Quick Test**
 - Build: `go build ./cmd/mml-retune`
 - Run: `mml-retune -c config.json < input.mml > output.mml`
-

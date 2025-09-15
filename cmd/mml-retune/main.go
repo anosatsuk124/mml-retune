@@ -20,21 +20,19 @@ func main() {
 
     path := *cfgPath
     if path == "" && *cfgPathLong != "" { path = *cfgPathLong }
-    if path == "" {
-        fmt.Fprintln(os.Stderr, "-c config.json is required")
-        os.Exit(2)
-    }
-
-    f, err := os.Open(path)
-    if err != nil {
-        fmt.Fprintln(os.Stderr, "failed to open config:", err)
-        os.Exit(1)
-    }
-    defer f.Close()
-    cfg, err := config.Load(f)
-    if err != nil {
-        fmt.Fprintln(os.Stderr, "failed to load config:", err)
-        os.Exit(1)
+    var cfg *config.Config
+    if path != "" {
+        f, err := os.Open(path)
+        if err != nil {
+            fmt.Fprintln(os.Stderr, "failed to open config:", err)
+            os.Exit(1)
+        }
+        defer f.Close()
+        cfg, err = config.Load(f)
+        if err != nil {
+            fmt.Fprintln(os.Stderr, "failed to load config:", err)
+            os.Exit(1)
+        }
     }
 
     // read stdin
@@ -55,4 +53,3 @@ func main() {
     }
     fmt.Print(out)
 }
-
